@@ -13,30 +13,40 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// Google Drive Setup
-const auth = new google.auth.GoogleAuth({
-  credentials: {
-    type: process.env.GOOGLE_TYPE,
-    project_id: process.env.GOOGLE_PROJECT_ID,
-    private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
-    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    client_id: process.env.GOOGLE_CLIENT_ID,
-    auth_uri: process.env.GOOGLE_AUTH_URI,
-    token_uri: process.env.GOOGLE_TOKEN_URI,
-    auth_provider_x509_cert_url: process.env.GOOGLE_AUTH_PROVIDER_CERT_URL,
-    client_x509_cert_url: process.env.GOOGLE_CLIENT_CERT_URL
-  },
-  scopes: ['https://www.googleapis.com/auth/drive.file']
-});
+// Google Drive Setup - SIMPLIFIED
+let drive;
+try {
+  const auth = new google.auth.GoogleAuth({
+    keyFile: process.env.GOOGLE_CREDENTIALS ? JSON.parse(process.env.GOOGLE_CREDENTIALS) : undefined,
+    credentials: process.env.GOOGLE_PRIVATE_KEY ? {
+      type: process.env.GOOGLE_TYPE,
+      project_id: process.env.GOOGLE_PROJECT_ID,
+      private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
+      private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      client_email: process.env.GOOGLE_CLIENT_EMAIL,
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      auth_uri: process.env.GOOGLE_AUTH_URI,
+      token_uri: process.env.GOOGLE_TOKEN_URI,
+      auth_provider_x509_cert_url: process.env.GOOGLE_AUTH_PROVIDER_CERT_URL,
+      client_x509_cert_url: process.env.GOOGLE_CLIENT_CERT_URL
+    } : undefined,
+    scopes: ['https://www.googleapis.com/auth/drive.file']
+  });
 
-const drive = google.drive({ version: 'v3', auth });
+  drive = google.drive({ version: 'v3', auth });
+  console.log('✅ Google Drive initialized successfully');
+} catch (error) {
+  console.error('❌ Google Drive init failed:', error.message);
+  drive = null;
+}
 
 // Store upload progress
 const uploadProgress = new Map();
 
 // Create folder in Google Drive
 async function createCustomerFolder(customerName, orderNumber) {
+  if (!drive) throw new Error('Google Drive not initialized');
+
   const folderName = `${customerName}-ORDER-${orderNumber}-${Date.now()}`;
   
   const folderMetadata = {
@@ -67,6 +77,8 @@ async function createCustomerFolder(customerName, orderNumber) {
 
 // Upload file to Google Drive
 async function uploadToDrive(file, folderId) {
+  if (!drive) throw new Error('Google Drive not initialized');
+
   const fileMetadata = {
     name: file.originalname,
     parents: [folderId]
@@ -111,6 +123,14 @@ const upload = multer({
 // Upload endpoint with progress tracking
 app.post('/api/upload-photos', upload.array('photos', 10), async (req, res) => {
   try {
+    // Check if Google Drive is connected
+    if (!drive) {
+      return res.status(500).json({ 
+        error: 'Google Drive not connected', 
+        details: 'Server cannot access Google Drive. Check environment variables.' 
+      });
+    }
+
     const { customerName, orderNumber } = req.body;
     const files = req.files;
     const uploadId = Date.now().toString();
@@ -128,7 +148,7 @@ app.post('/api/upload-photos', upload.array('photos', 10), async (req, res) => {
     });
 
     // Create customer folder
-    const folder = await createCustomerFolder(customerName, orderNumber);
+    const folder = await createCustomerFolder(customerName || 'Customer', orderNumber || 'TEST');
     
     // Update progress with folder link
     uploadProgress.set(uploadId, {
@@ -166,7 +186,11 @@ app.post('/api/upload-photos', upload.array('photos', 10), async (req, res) => {
 
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ error: 'Upload failed', details: error.message });
+    res.status(500).json({ 
+      error: 'Upload failed', 
+      details: error.message,
+      debug: 'Check Google Drive connection and credentials'
+    });
   }
 });
 
@@ -179,9 +203,34 @@ app.get('/api/upload-progress/:uploadId', (req, res) => {
   res.json(progress);
 });
 
+// Test endpoint to check Google Drive connection
+app.get('/test-drive', async (req, res) => {
+  try {
+    if (!drive) {
+      return res.json({ success: false, error: 'Drive not initialized' });
+    }
+    
+    const result = await drive.files.list({ pageSize: 1 });
+    res.json({ 
+      success: true, 
+      message: 'Google Drive connected successfully!',
+      files: result.data.files.length
+    });
+  } catch (error) {
+    res.json({ 
+      success: false, 
+      error: 'Google Drive connection failed',
+      details: error.message 
+    });
+  }
+});
+
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.json({ message: 'Photo Upload Server is running!' });
+  res.json({ 
+    message: 'Photo Upload Server is running!',
+    driveStatus: drive ? 'Connected' : 'Not Connected'
+  });
 });
 
 app.listen(port, () => {
